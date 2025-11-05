@@ -85,6 +85,20 @@ void rotary_onButtonClick()
     if (displayLock) {
         return;
     }
+    // If we're currently showing the finished screen, a single button press
+    // should exit that screen and perform the shotOffset auto-adjust (if
+    // pending). This moves the adjustment trigger from the timer to an
+    // explicit user action.
+    if (scaleStatus == STATUS_GRINDING_FINISHED) {
+        Serial.println("Button press while in FINISHED state: running shotOffset adjustment and exiting...");
+        applyShotOffsetAdjustmentOnExit();
+        // Reset grinding timestamps and transition to empty state
+        startedGrindingAt = 0;
+        finishedGrindingAt = 0;
+        scaleStatus = STATUS_EMPTY;
+        display_compensate_shot = false;
+        return;
+    }
     
     unsigned long currentTime = millis();
     static unsigned long lastTimePressed = 0;      // Timestamp of the last button press
@@ -193,10 +207,10 @@ void rotary_onButtonClick()
                 currentSubmenuItem = 0;
                 Serial.println("Entering Mode submenu");
                 break;
-            case 2: // Offset Menu
+            case 2: // Shot Offset Menu
                 scaleStatus = STATUS_IN_SUBMENU;
                 currentSetting = 2;
-                Serial.println("Offset Menu");
+                Serial.println("Shot Offset Menu");
                 break;
             case 3: // Info Menu
                 scaleStatus = STATUS_IN_SUBMENU;
@@ -276,7 +290,12 @@ void rotary_onButtonClick()
                 }
                 Serial.println("Calibration Menu");
                 break;
-            case 1: // Cup Weight Menu
+            case 1: // Compensation Menu (new dedicated item)
+                scaleStatus = STATUS_IN_SUBMENU;
+                currentSetting = 9; // new submenu id for Compensation
+                Serial.println("Compensation Menu");
+                break;
+            case 2: // Cup Weight Menu
                 scaleStatus = STATUS_IN_SUBMENU;
                 currentSetting = 0;
                 if (!tareScale()) {
@@ -301,27 +320,27 @@ void rotary_onButtonClick()
                     Serial.println("Error: Invalid cup weight detected");
                 }
                 break;
-            case 2: // Scale Mode Menu
+            case 3: // Scale Mode Menu
                 scaleStatus = STATUS_IN_SUBMENU;
                 currentSetting = 3;
                 Serial.println("Scale Mode Menu");
                 break;
-            case 3: // Grinding Mode Menu
+            case 4: // Grinding Mode Menu
                 scaleStatus = STATUS_IN_SUBMENU;
                 currentSetting = 4;
                 Serial.println("Grind Mode Menu");
                 break;
-            case 4: // Grind Trigger Menu
+            case 5: // Grind Trigger Menu
                 scaleStatus = STATUS_IN_SUBMENU;
                 currentSetting = 8; // Use setting 8 for grind trigger
                 Serial.println("Grind Trigger Menu");
                 break;
-            case 5: // Reset Menu
+            case 6: // Reset Menu
                 scaleStatus = STATUS_IN_SUBMENU;
                 currentSetting = 6;
                 Serial.println("Reset Menu");
                 break;
-            case 6: // Back
+            case 7: // Back
                 currentSubmenu = 0; // Return to main menu
                 currentSubmenuItem = 0;
                 Serial.println("Returning to main menu from Configuration submenu");
@@ -389,16 +408,31 @@ void rotary_onButtonClick()
             
             Serial.printf("Calibration completed: Raw reading = %.2f, New scale factor = %.2f\n", 
                          rawReading, newCalibrationValue);
-            
+            // Persist calibration and current display compensation value
+            preferences.begin("scale", false);
+            preferences.putDouble("calibration", newCalibrationValue);
+            preferences.putDouble("displayCompensation", display_compensation_g);
+            preferences.end();
+
             scaleStatus = STATUS_IN_MENU;
             currentSetting = -1;
             break;
         }
-        case 2: // Offset Menu
+        case 2: // Shot Offset Menu
         {
             preferences.begin("scale", false);
-            preferences.putDouble("offset", offset);
+            preferences.putDouble("shotOffset", shotOffset);
             preferences.end();
+            scaleStatus = STATUS_IN_MENU;
+            currentSetting = -1;
+            break;
+        }
+        case 9: // Compensation Menu - persist and exit
+        {
+            preferences.begin("scale", false);
+            preferences.putDouble("displayCompensation", display_compensation_g);
+            preferences.end();
+            Serial.printf("Compensation saved: %.1fg\n", display_compensation_g);
             scaleStatus = STATUS_IN_MENU;
             currentSetting = -1;
             break;
@@ -438,8 +472,8 @@ void rotary_onButtonClick()
                 preferences.putDouble("calibration", (double)LOADCELL_SCALE_FACTOR);
                 setWeight = (double)COFFEE_DOSE_WEIGHT;
                 preferences.putDouble("setWeight", (double)COFFEE_DOSE_WEIGHT);
-                offset = (double)COFFEE_DOSE_OFFSET;
-                preferences.putDouble("offset", (double)COFFEE_DOSE_OFFSET);
+                   shotOffset = (double)COFFEE_DOSE_OFFSET;
+                   preferences.putDouble("shotOffset", (double)COFFEE_DOSE_OFFSET);
                 setCupWeight = (double)CUP_WEIGHT;
                 preferences.putDouble("cup", (double)CUP_WEIGHT);
                 scaleMode = false;
@@ -619,19 +653,32 @@ void rotary_loop()
             int newValue = rotaryEncoder.readEncoder();
             int encoderDelta = newValue - encoderValue;
             
-            if (currentSetting == 2 && encoderDelta != 0)
-            { // Offset menu - make each detent = 0.01g
-                offset += (float)encoderDelta * 0.01 * encoderDir;
+            // Allow encoder to adjust display compensation when in the
+            // Compensation submenu (currentSetting == 9). Each detent = 0.1g.
+            if (currentSetting == 9 && encoderDelta != 0) {
+                display_compensation_g += (double)encoderDelta * 0.1 * encoderDir;
                 encoderValue = newValue;
-                if (abs(offset) >= setWeight)
+                // Bound to reasonable limits
+                if (display_compensation_g < 0.0) display_compensation_g = 0.0;
+                if (display_compensation_g > 20.0) display_compensation_g = 20.0;
+                // Round to 0.1g
+                display_compensation_g = round(display_compensation_g * 10.0) / 10.0;
+                Serial.printf("Display compensation: %.1fg\n", display_compensation_g);
+            }
+
+            if (currentSetting == 2 && encoderDelta != 0)
+            { // Shot offset menu - make each detent = 0.01g
+                shotOffset += (float)encoderDelta * 0.01 * encoderDir;
+                encoderValue = newValue;
+                if (abs(shotOffset) >= setWeight)
                 {
-                    offset = setWeight; // Prevent nonsensical offsets
+                    shotOffset = setWeight; // Prevent nonsensical offsets
                 }
                 // Round to nearest 0.01g
-                offset = round(offset * 100.0) / 100.0;
+                shotOffset = round(shotOffset * 100.0) / 100.0;
                 
-                Serial.print("Offset: ");
-                Serial.print(offset, 2);
+                Serial.print("ShotOffset: ");
+                Serial.print(shotOffset, 2);
                 Serial.print("g (delta: ");
                 Serial.print(encoderDelta);
                 Serial.println(")");

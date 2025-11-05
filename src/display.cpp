@@ -7,6 +7,11 @@
 #include "rotary.hpp"
 #include "web_server.hpp"
 
+// External flag set by scale logic to indicate the finished-screen compensation
+extern bool display_compensate_shot;
+// Amount to add to displayed weight when display_compensate_shot is true
+extern double display_compensation_g;
+
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C screen(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ OLED_SCL, /* data=*/ OLED_SDA);
 TaskHandle_t DisplayTask;
 extern String currentIPAddress;
@@ -85,7 +90,7 @@ int menuItemsCount = 5;       // Total number of main menu items
 MenuItem menuItems[5] = {
     {0, false, "Exit", 0},
     {1, false, "Mode", 0},
-    {2, false, "Offset", 0.1, &offset},
+  {2, false, "Offset", 0.1, &shotOffset},
     {3, false, "Info Menu", 0},
     {4, false, "Configuration", 0}
 };
@@ -99,15 +104,16 @@ MenuItem modeMenuItems[3] = {
 };
 
 // Configuration submenu items
-int configMenuItemsCount = 7;
-MenuItem configMenuItems[7] = {
-    {0, false, "Calibrate", 0},
-    {1, false, "Cup weight", 1, &setCupWeight},
-    {2, false, "Scale Mode", 0},
-    {3, false, "Grinding Mode", 0},
-    {4, false, "Grind Trigger", 0},
-    {5, false, "Reset", 0},
-    {6, false, "Back", 0}
+int configMenuItemsCount = 8;
+MenuItem configMenuItems[8] = {
+  {0, false, "Calibrate", 0},
+  {1, false, "Compensation", 0.1, &display_compensation_g},
+  {2, false, "Cup weight", 1, &setCupWeight},
+  {3, false, "Scale Mode", 0},
+  {4, false, "Grinding Mode", 0},
+  {5, false, "Grind Trigger", 0},
+  {6, false, "Reset", 0},
+  {7, false, "Back", 0}
 };
 
 // Submenu tracking variables
@@ -225,9 +231,30 @@ void showOffsetMenu()
   screen.setFont(u8g2_font_7x14B_tf);           // Set the font for the menu title
   CenterPrintToScreen("Adjust offset", 0);      // Print the menu title
   screen.setFont(u8g2_font_7x13_tr);            // Set the font for the offset value
-  snprintf(buf, sizeof(buf), "%3.2fg", offset); // Format the offset value
+  snprintf(buf, sizeof(buf), "%3.2fg", shotOffset); // Format the shotOffset value
   CenterPrintToScreen(buf, 28);                 // Print the offset value
   screen.sendBuffer();                          // Send the buffer to the display
+}
+
+// Dedicated Compensation menu so user can edit stuck-grounds compensation
+void showCompensationMenu()
+{
+  char buf[32];
+  screen.clearBuffer();
+  screen.setFontPosTop();
+  screen.setFont(u8g2_font_7x14B_tf);
+  CenterPrintToScreen("Compensation", 0);
+
+  screen.setFontPosCenter();
+  screen.setFont(u8g2_font_7x14B_tf);
+  screen.setCursor(0, 28);
+  snprintf(buf, sizeof(buf), "%3.1fg", display_compensation_g);
+  CenterPrintToScreen(buf, 28);
+
+  screen.setFont(u8g2_font_7x13_tr);
+  LeftPrintToScreen("Adjust with dial", 50);
+  LeftPrintToScreen("Press to save", 58);
+  screen.sendBuffer();
 }
 
 // Function to display the scale mode menu
@@ -314,6 +341,12 @@ void showCalibrationMenu()
   CenterPrintToScreen("Place 100g weight", 19); // Print instructions
   CenterPrintToScreen("on scale and", 35);      // Print instructions
   CenterPrintToScreen("press button", 51);      // Print instructions
+  // Show current display compensation value (editable via encoder while
+  // in this submenu). This helps quick access to the stuck-grounds setting.
+  screen.setFont(u8g2_font_5x8_tf);
+  char buf[32];
+  snprintf(buf, sizeof(buf), "Compensation: %.1fg", display_compensation_g);
+  LeftPrintToScreen(buf, 58);
   screen.sendBuffer();                          // Send the buffer to the display
 }
 
@@ -399,6 +432,10 @@ void showSetting()
   {
     showGrindTriggerMenu();
   }
+  else if (currentSetting == 9)
+  {
+    showCompensationMenu();
+  }
 
 }
 
@@ -410,6 +447,11 @@ void updateDisplay(void *parameter)
 
   for (;;)
   {
+    // Clear the display compensation flag as soon as we leave the finished screen
+    if (scaleStatus != STATUS_GRINDING_FINISHED) {
+      display_compensate_shot = false;
+    }
+
     if (displayLock)
     {
       delay(50); // Skip updating the display while locked
@@ -509,9 +551,11 @@ void updateDisplay(void *parameter)
 
         screen.setFontPosCenter();
         screen.setFont(u8g2_font_7x14B_tf);
-        screen.setCursor(3, 32);
-        snprintf(buf, sizeof(buf), "%3.1fg", scaleWeight - cupWeightEmpty);
-        screen.print(buf);
+  screen.setCursor(3, 32);
+  double displayed = scaleWeight - cupWeightEmpty;
+  if (display_compensate_shot) displayed += display_compensation_g;
+  snprintf(buf, sizeof(buf), "%3.1fg", displayed);
+  screen.print(buf);
 
         screen.setFontPosCenter();
         screen.setFont(u8g2_font_unifont_t_symbols);
